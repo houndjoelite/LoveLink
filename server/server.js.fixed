@@ -1,0 +1,294 @@
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const cors = require('cors');
+const { v4: uuidv4 } = require('uuid');
+
+const app = express();
+const server = http.createServer(app);
+
+// Configuration CORS pour permettre les connexions depuis le client React
+const io = new Server(server, {
+  cors: {
+    origin: "http://localhost:3000",
+    methods: ["GET", "POST"]
+  }
+});
+
+app.use(cors());
+app.use(express.json());
+
+// Stockage temporaire des connexions et salles d'amour
+const connections = new Map();
+const loveRooms = new Map();
+
+// Endpoint pour créer une nouvelle salle d'amour
+app.post('/api/create-love-room', (req, res) => {
+  try {
+    // Générer un code de 6 caractères alphanumériques en majuscules
+    const generateRoomId = () => {
+      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      let result = '';
+      for (let i = 0; i < 6; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+      }
+      return result;
+    };
+    
+    // Vérifier que le code n'existe pas déjà (peu probable mais bon)
+    let roomId;
+    let attempts = 0;
+    const maxAttempts = 5;
+    
+    do {
+      roomId = generateRoomId();
+      attempts++;
+      if (attempts >= maxAttempts) {
+        throw new Error('Impossible de générer un code de salle unique');
+      }
+    } while (loveRooms.has(roomId));
+    
+    // Créer la nouvelle salle
+    loveRooms.set(roomId, {
+      id: roomId,
+      participants: [],
+      createdAt: new Date()
+    });
+    
+    console.log(`💖 Nouvelle salle d'amour créée: ${roomId}`);
+    res.status(201).json({ roomId });
+    
+  } catch (error) {
+    console.error('❌ Erreur lors de la création de la salle:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Fonction utilitaire pour normaliser l'ID de la salle
+const normalizeRoomId = (id) => {
+  if (!id) return '';
+  return id.toString().toUpperCase().trim();
+};
+
+// Endpoint pour vérifier une salle (insensible à la casse)
+app.post('/api/check-room', (req, res) => {
+  try {
+    const { roomId } = req.body;
+    const normalizedId = normalizeRoomId(roomId);
+    
+    if (!normalizedId) {
+      return res.status(400).json({ error: 'ID de salle requis' });
+    }
+    
+    // Vérifier si la salle existe
+    const room = loveRooms.get(normalizedId);
+    if (!room) {
+      return res.status(404).json({ error: 'Salle introuvable' });
+    }
+    
+    res.json({ exists: true, roomId: normalizedId });
+    
+  } catch (error) {
+    console.error('❌ Erreur lors de la vérification de la salle:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Fonction pour trouver une salle par son ID (insensible à la casse)
+const findRoomById = (roomId) => {
+  if (!roomId) return null;
+  
+  const normalizedId = normalizeRoomId(roomId);
+  
+  // Vérifier si la salle existe
+  const room = loveRooms.get(normalizedId);
+  if (room) return room;
+  
+  // Si on ne trouve pas avec l'ID normalisé, vérifier avec une recherche insensible à la casse
+  for (const [id, room] of loveRooms.entries()) {
+    if (id.toUpperCase() === normalizedId) {
+      return room;
+    }
+  }
+  
+  return null;
+};
+
+// Endpoint pour rejoindre une salle
+app.post('/api/join-love-room', (req, res) => {
+  const { roomId } = req.body;
+  
+  if (!roomId) {
+    return res.status(400).json({ error: 'ID de salle requis' });
+  }
+  
+  const room = findRoomById(roomId);
+  if (!room) {
+    return res.status(404).json({ error: 'Salle introuvable' });
+  }
+  
+  res.json({ roomId: room.id });
+});
+
+// Gestion des connexions WebSocket
+io.on('connection', (socket) => {
+  console.log('💕 Utilisateur connecté:', socket.id);
+
+  // Rejoindre une salle d'amour
+  socket.on('join-love-room', ({ roomId, isCreator = false }) => {
+    try {
+      if (!roomId) {
+        throw new Error('ID de salle requis');
+      }
+
+      const room = findRoomById(roomId);
+      if (!room) {
+        throw new Error('Salle introuvable');
+      }
+
+      // Vérifier si l'utilisateur est déjà dans la salle
+      const existingParticipant = room.participants.find(p => p.socketId === socket.id);
+      if (existingParticipant) {
+        console.log(`👤 Utilisateur ${socket.id} déjà dans la salle ${roomId}`);
+        return;
+      }
+
+      // Ajouter l'utilisateur à la salle
+      const participant = {
+        id: uuidv4(),
+        socketId: socket.id,
+        isCreator,
+        joinedAt: new Date()
+      };
+
+      room.participants.push(participant);
+      socket.join(room.id);
+      connections.set(socket.id, { roomId: room.id });
+
+      console.log(`💝 ${socket.id} a rejoint la salle ${room.id} (${room.participants.length} participants)`);
+
+      // Informer les autres utilisateurs de la salle
+      socket.to(room.id).emit('user-joined', {
+        userId: participant.id,
+        isCreator,
+        participantsCount: room.participants.length
+      });
+
+      // Envoyer la liste des participants au nouvel utilisateur
+      socket.emit('room-info', {
+        roomId: room.id,
+        participants: room.participants.map(p => ({
+          id: p.id,
+          isCreator: p.isCreator
+        })),
+        isCreator
+      });
+
+    } catch (error) {
+      console.error(`❌ Erreur lors de la connexion à la salle: ${error.message}`);
+      socket.emit('error', { message: error.message });
+    }
+  });
+
+  // Gestion des offres et réponses WebRTC
+  socket.on('love-offer', (data) => {
+    if (!data.roomId || !loveRooms.has(data.roomId)) {
+      return socket.emit('error', { message: 'Salle introuvable' });
+    }
+    
+    const room = loveRooms.get(data.roomId);
+    const targetParticipant = room.participants.find(p => p.id === data.targetUserId);
+    
+    if (targetParticipant) {
+      socket.to(targetParticipant.socketId).emit('love-offer', {
+        from: socket.id,
+        offer: data.offer
+      });
+    }
+  });
+
+  socket.on('love-answer', (data) => {
+    if (!data.roomId || !loveRooms.has(data.roomId)) {
+      return socket.emit('error', { message: 'Salle introuvable' });
+    }
+    
+    const room = loveRooms.get(data.roomId);
+    const targetParticipant = room.participants.find(p => p.id === data.targetUserId);
+    
+    if (targetParticipant) {
+      socket.to(targetParticipant.socketId).emit('love-answer', {
+        from: socket.id,
+        answer: data.answer
+      });
+    }
+  });
+
+  // Échange des candidats ICE
+  socket.on('ice-candidate', (data) => {
+    if (!data.roomId || !loveRooms.has(data.roomId)) {
+      return;
+    }
+    
+    const room = loveRooms.get(data.roomId);
+    const targetParticipant = room.participants.find(p => p.id === data.targetUserId);
+    
+    if (targetParticipant) {
+      socket.to(targetParticipant.socketId).emit('ice-candidate', {
+        from: socket.id,
+        candidate: data.candidate
+      });
+    }
+  });
+
+  // Gestion de la déconnexion
+  socket.on('disconnect', () => {
+    console.log(`👋 Utilisateur déconnecté: ${socket.id}`);
+    
+    const connection = connections.get(socket.id);
+    if (!connection || !connection.roomId) return;
+    
+    const room = loveRooms.get(connection.roomId);
+    if (!room) return;
+    
+    // Retirer l'utilisateur de la salle
+    const participantIndex = room.participants.findIndex(p => p.socketId === socket.id);
+    if (participantIndex !== -1) {
+      room.participants.splice(participantIndex, 1);
+      console.log(`🚶‍♂️ ${socket.id} a quitté la salle ${room.id} (${room.participants.length} restants)`);
+      
+      // Notifier les autres utilisateurs de la salle
+      socket.to(room.id).emit('partner-left', {
+        message: 'Votre partenaire s\'est déconnecté',
+        remainingParticipants: room.participants.length
+      });
+      
+      // Supprimer la salle si elle est vide
+      if (room.participants.length === 0) {
+        loveRooms.delete(room.id);
+        console.log(`💔 Salle d'amour ${room.id} supprimée (vide)`);
+      }
+    }
+    
+    // Nettoyer les connexions
+    connections.delete(socket.id);
+  });
+});
+
+// Nettoyage des salles inactives (plus de 24h)
+setInterval(() => {
+  const now = new Date();
+  for (const [roomId, room] of loveRooms.entries()) {
+    if (now - room.createdAt > 24 * 60 * 60 * 1000) {
+      loveRooms.delete(roomId);
+      console.log(`💔 Nettoyage: Salle d'amour ${roomId} expirée`);
+    }
+  }
+}, 60 * 60 * 1000); // Vérifie toutes les heures
+
+// Démarrer le serveur
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`💕 Serveur LoveLink en cours d'exécution sur le port ${PORT}`);
+  console.log('💕 Prêt à connecter les amoureux!');
+  console.log(`💕 URL: http://localhost:${PORT}`);
+});

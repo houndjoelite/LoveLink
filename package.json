@@ -1,0 +1,42 @@
+{
+  "name": "lovelink",
+  "version": "1.0.0",
+  "description": "Application de messagerie privée pour deux amoureux (décentralisée & chiffrée)",
+  "main": "server/server.js",
+  "scripts": {
+    "install-all": "cd server && npm install && cd ../client && npm install",
+    "start": "concurrently \"npm run server\" \"npm run client\"",
+    "server": "cd server && npm start",
+    "client": "cd client && npm start",
+    "build": "cd client && npm run build",
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "test": "echo \"💕 LoveLink - Tests manuels requis\" && exit 0"
+  },
+  "keywords": [
+    "messagerie",
+    "chiffrement",
+    "p2p",
+    "webrtc",
+    "couple",
+    "privacy",
+    "romance",
+    "secure-chat"
+  ],
+  "author": "LoveLink Team",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^7.6.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/votre-username/lovelink.git"
+  },
+  "bugs": {
+    "url": "https://github.com/votre-username/lovelink/issues"
+  },
+  "homepage": "https://github.com/votre-username/lovelink#readme"
+}
+
+
+
+
